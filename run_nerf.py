@@ -45,7 +45,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs_flat = batchify(fn, netchunk)(embedded) # prediction - color + opacity
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -365,6 +365,7 @@ def render_rays(ray_batch,
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
+    # Ray sampling strategy
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
         z_vals = near * (1.-t_vals) + far * (t_vals)
@@ -389,6 +390,7 @@ def render_rays(ray_batch,
 
         z_vals = lower + (upper - lower) * t_rand
 
+    # sampling along the rays
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
     raw = network_query_fn(pts, viewdirs, network_fn)
@@ -484,7 +486,7 @@ def config_parser():
                         help='exponential learning rate decay (in 1000 steps)')
     parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*64, 
+    parser.add_argument("--netchunk", type=int, default=1024*128, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
@@ -687,7 +689,7 @@ def train():
     N_rand = args.N_rand
 
     print('get rays')
-    rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+    rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:, :3, :4]], 0) # [N, ro+rd, H, W, 3]
     print('done, concats')
 
     # prepare training rays
@@ -718,7 +720,8 @@ def train():
     print('VAL views are', i_val)
     
     start = start + 1
-    for i in trange(start, N_iters):
+    loop = tqdm(range(start, N_iters))
+    for i in loop:
 
         # active evaluation
         if i in args.active_iter:
@@ -800,8 +803,9 @@ def train():
             param_group['lr'] = new_lrate
         ################################
 
-        dt = time.time()-time0
-        print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
+        dt = time.time() - time0
+        loop.set_description(f"Iter [{global_step}] Time [{dt:.4f}]")
+        loop.set_postfix(loss=loss.item())
         ####           end            #####
 
         # Rest is logging

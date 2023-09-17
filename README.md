@@ -31,7 +31,7 @@ bash download_example_data.sh
 Train ActiveNeRF:
 
 ```
-python run_nerf.py --config configs/hotdog_active.txt --expname active_hotdog --datadir ./data/hotdog
+python run_nerf.py --config configs/llff_active.txt --expname active_llff --datadir ./data/nerf_llff_data/fern
 ```
 
 ## Contact
