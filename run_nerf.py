@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
-
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
@@ -37,15 +37,18 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    # position embedding
     embedded = embed_fn(inputs_flat)
 
+    # viewdir embeeding
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded) # prediction - color + opacity
+    # prediction (N, 5): color + opacity + uncert
+    outputs_flat = batchify(fn, netchunk)(embedded) 
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -147,10 +150,7 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     disps = []
     uncerts = []
 
-    t = time.time()
-    for i, c2w in enumerate(tqdm(render_poses)):
-        print(i, time.time() - t)
-        t = time.time()
+    for i, c2w in enumerate(render_poses):
         rgb, disp, acc, uncert, alpha, _ = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
@@ -365,7 +365,7 @@ def render_rays(ray_batch,
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
-    # Ray sampling strategy
+    # TODO Ray sampling strategy
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
         z_vals = near * (1.-t_vals) + far * (t_vals)
@@ -397,7 +397,7 @@ def render_rays(ray_batch,
     rgb_map, disp_map, acc_map, weights, depth_map, uncert_map, alpha_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     if N_importance > 0:
-
+        # RUN Fine network
         rgb_map_0, disp_map_0, acc_map_0, uncert_map_0, alpha_map_0 = rgb_map, disp_map, acc_map, uncert_map, alpha_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
@@ -444,6 +444,7 @@ def choose_new_k(H, W, focal, batch_rays, k, **render_kwargs_train):
         uncert_pts = extras['raw'][...,-1].reshape(-1, H*W, args.N_samples + args.N_importance) + 1e-9
         weight_pts = extras['weights'].reshape(-1, H*W, args.N_samples + args.N_importance)
 
+        # Eq 19) in article
         pre = uncert_pts.sum([1,2])
         post = (1. / (1. / uncert_pts + weight_pts * weight_pts / uncert_render)).sum([1,2])
         pres.append(pre)
@@ -486,7 +487,7 @@ def config_parser():
                         help='exponential learning rate decay (in 1000 steps)')
     parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*128, 
+    parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
@@ -646,6 +647,9 @@ def train():
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
+    # tensorboard 
+    writer = SummaryWriter(os.path.join(basedir, expname))
+
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, i_train_load, i_holdout_load = create_nerf(args)
     global_step = start
@@ -723,8 +727,9 @@ def train():
     loop = tqdm(range(start, N_iters))
     for i in loop:
 
-        # active evaluation
-        if i in args.active_iter:
+        # TODO Active select candidate views
+        # active evaluation at XXX0001 step
+        if i - 1 in args.active_iter:
             print('start evaluation:')
             print('get rays')
             rays = np.stack([get_rays_np(H, W, focal, p) for p in poses.cpu().numpy()[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
@@ -740,7 +745,7 @@ def train():
             batch_rays = rays_rgb_holdout[:2]
 
             print('before evaluation:', i_train, i_holdout)
-            # capture new rays
+            # TODO Select next view
             hold_out_index = choose_new_k(H//args.ds_rate, W//args.ds_rate, focal, batch_rays, args.choose_k, **render_kwargs_test)
             i_train = np.append(i_train, i_holdout[hold_out_index])
             i_holdout = np.delete(i_holdout, hold_out_index)
@@ -805,7 +810,9 @@ def train():
 
         dt = time.time() - time0
         loop.set_description(f"Iter [{global_step}] Time [{dt:.4f}]")
-        loop.set_postfix(loss=loss.item())
+        loop.set_postfix(loss=loss.item(), psnr=psnr.item())
+        writer.add_scalar("loss", loss.item(), global_step=i)
+        writer.add_scalar("psnr", psnr.item(), global_step=i)
         ####           end            #####
 
         # Rest is logging
@@ -832,16 +839,23 @@ def train():
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'uncert.mp4', to8b(uncerts / np.max(uncerts)), fps=30, quality=8)
 
-        if i%args.i_testset==0 and i > 0:
+        if i%args.i_testset == 0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+                rgbs, disps, uncerts, _ = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+
+                rgbs = torch.from_numpy(rgbs).cuda()
+                val_loss = img2mse(rgbs, images[i_test])
+                val_psnr = mse2psnr(img2mse(rgbs, images[i_test]))
+                writer.add_hparams(
+                    {"train_size": len(i_train), "test_size": len(i_test), "training_step": i},
+                    {"mse": val_loss.item(), "psnr": val_psnr.item()},
+                    run_name=f"step_{i}_trainsize_{len(i_train)}"
+                )
     
-        if i%args.i_print==0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+        # if i%args.i_print==0:
+        #     tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))

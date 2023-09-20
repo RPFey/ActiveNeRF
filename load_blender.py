@@ -49,7 +49,8 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         imgs = []
         poses = []
         if s=='train' or testskip==0:
-            skip = 1
+            # TODO Hardcode to 5 (4 samples in the training set)
+            skip = 5
         elif s=='holdout':
             skip = 1
         else:
