@@ -1,19 +1,19 @@
 expname = blender_paper_lego
-basedir = ./logs/lego_uncert_fullres
+basedir = ./logs/blender
 datadir = ./data/nerf_synthetic/lego
 dataset_type = blender
 
-active_iter = [40_000, 80_000, 120_000, 160_000]
+active_iter = 20_000
 i_weights = 20_000
-i_testset = 20_000
-i_video = 20_000
-i_all = 200_000
+i_testset = 10_000
+i_video = 340_000
+i_all = 340_000
  
 use_viewdirs = True
 white_bkgd = True
 lrate_decay = 500
 
-testskip = 4
+testskip = 8
 N_samples = 64
 N_importance = 128
 N_rand = 1024
