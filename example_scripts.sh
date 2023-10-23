@@ -1,5 +1,16 @@
-python run_nerf.py --config configs/lego_active.txt --expname active_lego --basedir ./logs --datadir ./data/lego
+export CUDA_VISIBLE_DEVICES=0
 
-python run_nerf.py --config configs/hotdog_active.txt --expname active_hotdog --basedir ./logs --datadir ./data/hotdog
 
-python run_nerf.py --config configs/llff_active.txt --expname active_fern --basedir ./logs --datadir ./data/fern  --w 0.0 --init_image 5 --choose_k 2
+# RUN NeRF Synthetic
+# OBJS=("lego" "ship" "chair"  "drums"  "ficus"  "hotdog"  "materials"  "mic")
+# for OBJ in ${OBJS[@]}
+# do
+
+# python run_nerf.py --config configs/hotdog_active.txt \
+#         -t ckpt/${OBJ}_hessian_s1_K10 --active_method hessian_diagonal \
+#         --expname ckpt/${OBJ} --datadir /root/Dataset/nerf_synthetic/${OBJ}
+
+# done
+
+python -u run_nerf.py --config configs/hotdog_active.txt \
+        --expname ckpt/test --datadir /root/Dataset/nerf_synthetic/lego > nerf.txt

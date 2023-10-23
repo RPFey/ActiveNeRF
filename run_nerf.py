@@ -22,6 +22,83 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
 
+def compute_ssim(
+    img0,
+    img1,
+    max_val=1.0,
+    filter_size=11,
+    filter_sigma=1.5,
+    k1=0.01,
+    k2=0.03,
+    return_map=False,
+):
+    """Computes SSIM from two images.
+
+    This function was modeled after tf.image.ssim, and should produce comparable
+    output.
+
+    Args:
+      img0: torch.tensor. An image of size [..., width, height, num_channels].
+      img1: torch.tensor. An image of size [..., width, height, num_channels].
+      max_val: float > 0. The maximum magnitude that `img0` or `img1` can have.
+      filter_size: int >= 1. Window size.
+      filter_sigma: float > 0. The bandwidth of the Gaussian used for filtering.
+      k1: float > 0. One of the SSIM dampening parameters.
+      k2: float > 0. One of the SSIM dampening parameters.
+      return_map: Bool. If True, will cause the per-pixel SSIM "map" to returned
+
+    Returns:
+      Each image's mean SSIM, or a tensor of individual values if `return_map`.
+    """
+    device = img0.device
+    ori_shape = img0.size()
+    width, height, num_channels = ori_shape[-3:]
+    img0 = img0.view(-1, width, height, num_channels).permute(0, 3, 1, 2)
+    img1 = img1.view(-1, width, height, num_channels).permute(0, 3, 1, 2)
+    batch_size = img0.shape[0]
+
+    # Construct a 1D Gaussian blur filter.
+    hw = filter_size // 2
+    shift = (2 * hw - filter_size + 1) / 2
+    f_i = ((torch.arange(filter_size, device=device) - hw + shift) / filter_sigma) ** 2
+    filt = torch.exp(-0.5 * f_i)
+    filt /= torch.sum(filt)
+
+    # Blur in x and y (faster than the 2D convolution).
+    # z is a tensor of size [B, H, W, C]
+    filt_fn1 = lambda z: F.conv2d(
+        z, filt.view(1, 1, -1, 1).repeat(num_channels, 1, 1, 1),
+        padding=[hw, 0], groups=num_channels)
+    filt_fn2 = lambda z: F.conv2d(
+        z, filt.view(1, 1, 1, -1).repeat(num_channels, 1, 1, 1),
+        padding=[0, hw], groups=num_channels)
+
+    # Vmap the blurs to the tensor size, and then compose them.
+    filt_fn = lambda z: filt_fn1(filt_fn2(z))
+    mu0 = filt_fn(img0)
+    mu1 = filt_fn(img1)
+    mu00 = mu0 * mu0
+    mu11 = mu1 * mu1
+    mu01 = mu0 * mu1
+    sigma00 = filt_fn(img0 ** 2) - mu00
+    sigma11 = filt_fn(img1 ** 2) - mu11
+    sigma01 = filt_fn(img0 * img1) - mu01
+
+    # Clip the variances and covariances to valid values.
+    # Variance must be non-negative:
+    sigma00 = torch.clamp(sigma00, min=0.0)
+    sigma11 = torch.clamp(sigma11, min=0.0)
+    sigma01 = torch.sign(sigma01) * torch.min(
+        torch.sqrt(sigma00 * sigma11), torch.abs(sigma01)
+    )
+
+    c1 = (k1 * max_val) ** 2
+    c2 = (k2 * max_val) ** 2
+    numer = (2 * mu01 + c1) * (2 * sigma01 + c2)
+    denom = (mu00 + mu11 + c1) * (sigma00 + sigma11 + c2)
+    ssim_map = numer / denom
+    ssim = torch.mean(ssim_map.reshape([-1, num_channels*width*height]), dim=-1)
+    return ssim_map if return_map else ssim
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
@@ -149,18 +226,19 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     rgbs = []
     disps = []
     uncerts = []
+    psnrs = []
+    ssims = []
 
-    for i, c2w in enumerate(render_poses):
+    for i, c2w in enumerate(tqdm(render_poses)):
         rgb, disp, acc, uncert, alpha, _ = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         uncerts.append(uncert.cpu().numpy())
 
-        """
-        if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
+        psnr = -10. * torch.log10(torch.mean((rgb - gt_imgs[i]) ** 2))
+        psnrs.append(psnr.item())
+        ssim = compute_ssim(rgb, gt_imgs[i]).item()
+        ssims.append(ssim)
 
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
@@ -176,8 +254,10 @@ def render_path(render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=N
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
     uncerts = np.stack(uncerts, 0)
+    pnsrs = np.array(psnrs).mean()
+    ssims = np.array(ssims).mean()
 
-    return rgbs, disps, uncerts, None
+    return rgbs, disps, uncerts, pnsrs, ssims
 
 
 def create_nerf(args):
@@ -485,7 +565,7 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024*32, 
+    parser.add_argument("--chunk", type=int, default=1024*128, 
                         help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
@@ -528,7 +608,7 @@ def config_parser():
     # dataset options
     parser.add_argument("--dataset_type", type=str, default='llff', 
                         help='options: llff / blender')
-    parser.add_argument("--testskip", type=int, default=8, 
+    parser.add_argument("--testskip", type=int, default=32, 
                         help='will load 1/N images from test/val sets')
 
     ## blender flags
@@ -552,20 +632,20 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500, 
+    parser.add_argument("--i_img",     type=int, default=100_000, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
+    parser.add_argument("--i_weights", type=int, default=100_000, 
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, 
+    parser.add_argument("--i_testset", type=int, default=10_000, 
                         help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=50000, 
+    parser.add_argument("--i_video",   type=int, default=100_000, 
                         help='frequency of render_poses video saving')
 
     # configs for ActiveNeRF
-    parser.add_argument("--i_all",   type=int, default=500000) # Training iterations, 500000 for full-res nerfs
-    parser.add_argument('--active_iter', type=int, nargs='+', default=[100000, 200000, 300000, 400000]) # Iterations for active learning
-    parser.add_argument("--init_image",   type=int, default=10) # initial number of images, only for llff dataset
-    parser.add_argument("--choose_k",   type=int, default=4) # The number of new captured data for each active iter
+    parser.add_argument("--i_all",   type=int, default=340_000) # Training iterations, 500000 for full-res nerfs
+    parser.add_argument('--active_iter', type=int, default=20_000) # Iterations for active learning
+    parser.add_argument("--init_image",   type=int, default=4) # initial number of images, only for llff dataset
+    parser.add_argument("--choose_k",   type=int, default=1) # The number of new captured data for each active iter
     parser.add_argument("--beta_min",   type=float, default=0.01) # Minimun value for uncertainty
     parser.add_argument("--w",   type=float, default=0.01) # Strength for regularization as in Eq.(11)
     parser.add_argument("--ds_rate",   type=int, default=2) # Quality-efficiency trade-off factor as in Sec. 5.2
@@ -611,7 +691,11 @@ def train():
     elif args.dataset_type == 'blender':
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_holdout, i_val, i_test = i_split
+        i_train_all, i_val, i_test = i_split
+
+        init_views = np.array([42, 89, 85, 95])
+        i_train = i_train_all[init_views]
+        i_holdout = np.delete(i_train_all, init_views)
 
         near = 2.
         far = 6.
@@ -729,7 +813,7 @@ def train():
 
         # TODO Active select candidate views
         # active evaluation at XXX0001 step
-        if i - 1 in args.active_iter:
+        if i > 1 and (i - 1) % args.active_iter == 0 :
             print('start evaluation:')
             print('get rays')
             rays = np.stack([get_rays_np(H, W, focal, p) for p in poses.cpu().numpy()[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
@@ -829,28 +913,28 @@ def train():
             print('Saved checkpoints at', path)
 
 
-        if i%args.i_video==0 and i > 0:
-            # Turn on testing mode
-            with torch.no_grad():
-                rgbs, disps, uncerts, alphas = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(basedir, expname, 'spiral_{:06d}_'.format(i))
-            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'uncert.mp4', to8b(uncerts / np.max(uncerts)), fps=30, quality=8)
+        # if i%args.i_video==0 and i > 0:
+        #     # Turn on testing mode
+        #     with torch.no_grad():
+        #         rgbs, disps, uncerts, alphas = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+        #     print('Done, saving', rgbs.shape, disps.shape)
+        #     moviebase = os.path.join(basedir, expname, 'spiral_{:06d}_'.format(i))
+        #     imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'uncert.mp4', to8b(uncerts / np.max(uncerts)), fps=30, quality=8)
 
         if i%args.i_testset == 0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
-                rgbs, disps, uncerts, _ = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                rgbs, disps, uncerts, psnr, ssim = render_path(torch.Tensor(poses[i_test]).to(device), hwf, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
 
-                rgbs = torch.from_numpy(rgbs).cuda()
-                val_loss = img2mse(rgbs, images[i_test])
-                val_psnr = mse2psnr(img2mse(rgbs, images[i_test]))
+                # rgbs = torch.from_numpy(rgbs).cuda()
+                # val_loss = img2mse(rgbs, images[i_test])
+                # val_psnr = mse2psnr(img2mse(rgbs, images[i_test]))
                 writer.add_hparams(
                     {"train_size": len(i_train), "test_size": len(i_test), "training_step": i},
-                    {"mse": val_loss.item(), "psnr": val_psnr.item()},
+                    {"psnr": psnr, "ssim": ssim},
                     run_name=f"step_{i}_trainsize_{len(i_train)}"
                 )
     
