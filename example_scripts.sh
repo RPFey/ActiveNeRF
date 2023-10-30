@@ -7,6 +7,6 @@ for OBJ in ${OBJS[@]}
 do
 
 python run_nerf.py --config configs/hotdog_active.txt \
-        --expname ${OBJ}_s1 --datadir /root/Dataset/nerf_synthetic/${OBJ}
+        --expname ${OBJ}_s4 --datadir /root/Dataset/nerf_synthetic/${OBJ}
 
 done

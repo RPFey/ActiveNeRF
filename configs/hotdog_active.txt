@@ -6,8 +6,8 @@ dataset_type = blender
 active_iter = 20_000
 i_weights = 20_000
 i_testset = 10_000
-i_video = 340_000
-i_all = 340_000
+i_video = 20_000
+i_all = 200_000
  
 use_viewdirs = True
 white_bkgd = True

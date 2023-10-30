@@ -645,7 +645,7 @@ def config_parser():
     parser.add_argument("--i_all",   type=int, default=340_000) # Training iterations, 500000 for full-res nerfs
     parser.add_argument('--active_iter', type=int, default=20_000) # Iterations for active learning
     parser.add_argument("--init_image",   type=int, default=4) # initial number of images, only for llff dataset
-    parser.add_argument("--choose_k",   type=int, default=1) # The number of new captured data for each active iter
+    parser.add_argument("--choose_k",   type=int, default=4) # The number of new captured data for each active iter
     parser.add_argument("--beta_min",   type=float, default=0.01) # Minimun value for uncertainty
     parser.add_argument("--w",   type=float, default=0.01) # Strength for regularization as in Eq.(11)
     parser.add_argument("--ds_rate",   type=int, default=2) # Quality-efficiency trade-off factor as in Sec. 5.2
