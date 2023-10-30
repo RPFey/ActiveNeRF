@@ -691,11 +691,7 @@ def train():
     elif args.dataset_type == 'blender':
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train_all, i_val, i_test = i_split
-
-        init_views = np.array([42, 89, 85, 95])
-        i_train = i_train_all[init_views]
-        i_holdout = np.delete(i_train_all, init_views)
+        i_train, i_holdout, i_val, i_test = i_split
 
         near = 2.
         far = 6.
