@@ -3,10 +3,10 @@ basedir = ./logs/blender
 datadir = ./data/nerf_synthetic/lego
 dataset_type = blender
 
-active_iter = 20_000
-i_weights = 20_000
-i_testset = 10_000
-i_video = 20_000
+active_iter = 40_000
+i_weights = 40_000
+i_testset = 20_000
+i_video = 40_000
 i_all = 200_000
  
 use_viewdirs = True

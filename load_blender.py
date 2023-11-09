@@ -35,7 +35,7 @@ def pose_spherical(theta, phi, radius):
 
 
 def load_blender_data(basedir, half_res=False, testskip=1):
-    splits = ['train', 'holdout', 'val', 'test']
+    splits = ['train', 'val', 'test']
     metas = {}
     for s in splits:
         with open(os.path.join(basedir, 'transforms_{}.json'.format(s)), 'r') as fp:
@@ -65,11 +65,28 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         all_imgs.append(imgs)
         all_poses.append(poses)
     
-    i_split = [np.arange(counts[i], counts[i+1]) for i in range(4)]
-    
     imgs = np.concatenate(all_imgs, 0)
     poses = np.concatenate(all_poses, 0)
     
+    # FVS selection
+    # import pdb; pdb.set_trace()
+    train_set = counts[1]
+    train_poses = poses[:train_set]
+    train_split = np.array([0])
+    holdout_split = np.arange(1, train_set)
+    val_split = np.arange(counts[1], counts[2])
+    test_split = np.arange(counts[2], counts[3])
+    for i in range(3):
+        select_pose = poses[train_split][:, :3, 3].reshape(-1, 1, 3)
+        holdout_pose = poses[holdout_split][:, :3, 3].reshape(1, -1, 3)
+        distance = np.linalg.norm(select_pose - holdout_pose, 2, axis = -1) # (M, N)
+        min_dist = np.min(distance, axis = 0)
+        max_index = np.argmax(min_dist)
+        train_split = np.append(train_split, holdout_split[max_index])
+        holdout_split = np.delete(holdout_split, max_index)
+    
+    i_split = [train_split, holdout_split, val_split, test_split]
+
     H, W = imgs[0].shape[:2]
     camera_angle_x = float(meta['camera_angle_x'])
     focal = .5 * W / np.tan(.5 * camera_angle_x)
