@@ -3,7 +3,13 @@ basedir = ./logs
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
-factor = 1
+active_iter = 20_000
+i_weights = 20_000
+i_testset = 10_000
+i_video = 20_000
+i_all = 100_000
+
+factor = 4
 llffhold = 8
 
 N_rand = 1024

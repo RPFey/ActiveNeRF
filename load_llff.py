@@ -1,6 +1,6 @@
 import numpy as np
 import os, imageio
-
+from tqdm import tqdm
 
 ########## Slightly modified version of LLFF data loading code 
 ##########  see https://github.com/Fyusion/LLFF for original
@@ -45,7 +45,7 @@ def _minify(basedir, factors=[], resolutions=[]):
         check_output('cp {}/* {}'.format(imgdir_orig, imgdir), shell=True)
         
         ext = imgs[0].split('.')[-1]
-        args = ' '.join(['mogrify', '-resize', resizearg, '-format', 'png', '*.{}'.format(ext)])
+        args = ' '.join(['mogrify', '-resize', resizearg, '-format', 'jpg', '*.{}'.format(ext)])
         print(args)
         os.chdir(imgdir)
         check_output(args, shell=True)
@@ -110,8 +110,8 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
             return imageio.imread(f, ignoregamma=True)
         else:
             return imageio.imread(f)
-        
-    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    
+    imgs = imgs = [imread(f)[...,:3]/255. for f in tqdm(imgfiles)]
     imgs = np.stack(imgs, -1)  
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
@@ -302,18 +302,28 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
         
     render_poses = np.array(render_poses).astype(np.float32)
 
-    c2w = poses_avg(poses)
-    print('Data:')
-    print(poses.shape, images.shape, bds.shape)
+    all_index = np.arange(images.shape[0])
+    i_test = np.arange(0, images.shape[0], 8)
     
-    dists = np.sum(np.square(c2w[:3,3] - poses[:,:3,3]), -1)
-    i_test = np.argmin(dists)
-    print('HOLDOUT view is', i_test)
+    train_hold_index = np.delete(all_index, i_test)
+
+    train_split = train_hold_index[[0]]
+    holdout_split = train_hold_index[1:]
+    for i in range(3):
+        select_pose = poses[train_split][:, :3, 3].reshape(-1, 1, 3)
+        holdout_pose = poses[holdout_split][:, :3, 3].reshape(1, -1, 3)
+        distance = np.linalg.norm(select_pose - holdout_pose, 2, axis = -1) # (M, N)
+        min_dist = np.min(distance, axis = 0)
+        max_index = np.argmax(min_dist)
+        train_split = np.append(train_split, holdout_split[max_index])
+        holdout_split = np.delete(holdout_split, max_index)
+
+    splits = [train_split, holdout_split, i_test]
     
     images = images.astype(np.float32)
     poses = poses.astype(np.float32)
 
-    return images, poses, bds, render_poses, i_test
+    return images, poses, bds, render_poses, splits
 
 
 

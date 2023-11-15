@@ -10,17 +10,20 @@ import torch.nn.functional as F
 from tqdm import tqdm, trange
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
+from slurm_helper import ClusterStateManager
 
 from run_nerf_helpers import *
 
 from load_llff import load_llff_data
 from load_blender import load_blender_data
 import warnings
+import signal
 warnings.filterwarnings('ignore')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
+sm = ClusterStateManager()
 
 def compute_ssim(
     img0,
@@ -565,9 +568,9 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024*128, 
+    parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*64, 
+    parser.add_argument("--netchunk", type=int, default=1024*32, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
@@ -658,25 +661,23 @@ def train():
     # Load data
 
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        images, poses, bds, render_poses, splits = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+
+        i_train, i_holdout, i_test = splits
         if not isinstance(i_test, list):
             i_test = [i_test]
 
-        if args.llffhold > 0:
-            print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
+        i_val = i_test 
+        # if args.llffhold > 0:
+        #     print('Auto LLFF holdout,', args.llffhold)
+        #     i_test = np.arange(images.shape[0])[::args.llffhold]
 
-        i_val = i_test
-        i_trainhold = np.array([i for i in np.arange(int(images.shape[0])) if
-                        (i not in i_test and i not in i_val)])
-
-        i_holdout = i_trainhold[args.init_image:]
-        i_train = i_trainhold[:args.init_image]
+        # i_train, i_holdout, i_test = splits
 
         print('DEFINING BOUNDS')
         if args.no_ndc:
@@ -862,6 +863,9 @@ def train():
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
+        if sm.should_exit():
+            sm.requeue()
+
         optimizer.zero_grad()
         if uncert.min() > 0:
             img_loss = img2mse_uncert_alpha(rgb, target_s, uncert, alpha, args.w)
@@ -920,6 +924,10 @@ def train():
         #     imageio.mimwrite(moviebase + 'uncert.mp4', to8b(uncerts / np.max(uncerts)), fps=30, quality=8)
 
         if i%args.i_testset == 0 and i > 0:
+            del rgb
+            del disp
+            torch.cuda.empty_cache()
+
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
